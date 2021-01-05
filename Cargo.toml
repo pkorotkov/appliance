@@ -4,10 +4,11 @@ version = "0.1.0"
 edition = "2018"
 authors = ["Pavel Korotkov <pkorotkov@gmail.com>"]
 description = "A lightweight framework to build components with message-based intercommunications."
+documentation = "https://docs.rs/appliance"
 homepage = "https://github.com/pkorotkov/appliance"
 repository = "https://github.com/pkorotkov/appliance"
 license = "Apache-2.0 OR MIT"
-keywords = ["async", "actor", "message-passing"]
+keywords = ["async", "actor", "message-passing", "smol"]
 
 [dependencies]
 async-executor = "1.4.0"
