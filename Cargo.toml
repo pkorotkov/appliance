@@ -1,0 +1,18 @@
+[package]
+name = "appliance"
+version = "0.1.0"
+edition = "2018"
+authors = ["Pavel Korotkov <pkorotkov@gmail.com>"]
+description = "A lightweight framework to build components with message-based intercommunications."
+homepage = "https://github.com/pkorotkov/appliance"
+repository = "https://github.com/pkorotkov/appliance"
+license = "Apache-2.0 OR MIT"
+keywords = ["async", "actor", "message-passing"]
+
+[dependencies]
+async-executor = "1.4.0"
+async-io = "1.3.1"
+flume = "0.10.1"
+futures-lite = "1.11.3"
+once_cell = "1.5.2"
+num_cpus = "1.13.0"
