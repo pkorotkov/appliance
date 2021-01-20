@@ -33,7 +33,8 @@ pub enum Error {
     HandlingFailure,
 }
 
-/// An stateful entity that only allows to interact with via messages.
+/// A stateful entity that only allows to
+/// interact with via handling messages.
 #[derive(Debug)]
 pub struct Appliance<M> {
     messages_in: Sender<M>,
