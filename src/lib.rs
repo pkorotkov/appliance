@@ -48,12 +48,12 @@ impl<M> Clone for Appliance<M> {
     }
 }
 
-impl<M: Send + 'static> Appliance<M> {
+impl<'a, M: Send + 'a> Appliance<M> {
     /// Creates a new appliance.
-    pub fn new<S: Send + 'static>(
-        executor: &Executor<'_>,
+    pub fn new<S: Send + 'a>(
+        executor: &Executor<'a>,
         mut state: S,
-        handler: impl Fn(&mut S, M) + Send + 'static,
+        handler: impl Fn(&mut S, M) + Send + 'a,
         message_bus_size: Option<usize>,
     ) -> Self {
         let (messages_in, messages_out) = if let Some(mbs) = message_bus_size {
