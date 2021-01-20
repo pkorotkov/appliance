@@ -105,5 +105,5 @@ The recommended way to use this library is to add it as a dependency in your `Ca
 
 ```
 [dependencies]
-appliance = "0.1.0"
+appliance = "0.1.1"
 ```
