@@ -57,7 +57,10 @@ pub struct Appliance<M> {
     messages_in: Sender<M>,
 }
 
-impl<M: Send> Clone for Appliance<M> {
+unsafe impl<M> Send for Appliance<M> {}
+unsafe impl<M> Sync for Appliance<M> {}
+
+impl<M> Clone for Appliance<M> {
     fn clone(&self) -> Self {
         // NB: See std::sync::Arc source code for details.
         let old_size = self.inner().strong.fetch_add(1, Ordering::Relaxed);
@@ -68,6 +71,25 @@ impl<M: Send> Clone for Appliance<M> {
             ptr: self.ptr,
             messages_in: self.messages_in.clone(),
         }
+    }
+}
+
+impl<M> Drop for Appliance<M> {
+    #[inline]
+    fn drop(&mut self) {
+        self.inner().strong.fetch_sub(1, Ordering::Release);
+    }
+}
+
+impl<M> Appliance<M> {
+    /// Returns the number of strong pointers (clones) of a given appliance.
+    pub fn strong_count(this: &Self) -> usize {
+        this.inner().strong.load(Ordering::SeqCst)
+    }
+
+    #[inline]
+    fn inner(&self) -> &Inner {
+        unsafe { self.ptr.as_ref() }
     }
 }
 
@@ -108,15 +130,5 @@ impl<'a, M: Send + 'a> Appliance<M> {
             Err(_) => Err(Error::HandlingFailure),
             Ok(_) => Ok(()),
         }
-    }
-
-    /// Returns the number of strong pointers (clones) of a given appliance.
-    pub fn strong_count(this: &Self) -> usize {
-        this.inner().strong.load(Ordering::SeqCst)
-    }
-
-    #[inline]
-    fn inner(&self) -> &Inner {
-        unsafe { self.ptr.as_ref() }
     }
 }
