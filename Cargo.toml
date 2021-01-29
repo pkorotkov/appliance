@@ -1,6 +1,6 @@
 [package]
 name = "appliance"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2018"
 authors = ["Pavel Korotkov <pkorotkov@gmail.com>"]
 description = "A lightweight framework to build components with message-based intercommunications."

@@ -7,7 +7,15 @@ use async_io::block_on;
 use flume::{bounded, unbounded, Sender};
 use futures_lite::future::pending;
 use once_cell::sync::Lazy;
-use std::{panic::catch_unwind, thread};
+use std::{
+    panic::catch_unwind,
+    process::abort,
+    ptr::NonNull,
+    sync::atomic::{AtomicUsize, Ordering},
+    thread,
+};
+
+const MAX_REFCOUNT: usize = (isize::MAX) as usize;
 
 /// An async executor.
 pub type Executor<'a> = async_executor::Executor<'a>;
@@ -33,16 +41,31 @@ pub enum Error {
     HandlingFailure,
 }
 
+#[repr(C)]
+struct Inner {
+    strong: AtomicUsize,
+}
+
+unsafe impl Send for Inner {}
+unsafe impl Sync for Inner {}
+
 /// A stateful entity that only allows to
 /// interact with via handling messages.
 #[derive(Debug)]
 pub struct Appliance<M> {
+    ptr: NonNull<Inner>,
     messages_in: Sender<M>,
 }
 
-impl<M> Clone for Appliance<M> {
+impl<M: Send> Clone for Appliance<M> {
     fn clone(&self) -> Self {
+        // NB: See std::sync::Arc source code for details.
+        let old_size = self.inner().strong.fetch_add(1, Ordering::Relaxed);
+        if old_size > MAX_REFCOUNT {
+            abort();
+        }
         Appliance {
+            ptr: self.ptr,
             messages_in: self.messages_in.clone(),
         }
     }
@@ -61,7 +84,11 @@ impl<'a, M: Send + 'a> Appliance<M> {
         } else {
             unbounded()
         };
-        let appliance = Appliance { messages_in };
+        let boxed_inner = Box::new(Inner {
+            strong: AtomicUsize::new(1),
+        });
+        let ptr = Box::leak(boxed_inner).into();
+        let appliance = Appliance { ptr, messages_in };
         executor
             .spawn(async move {
                 loop {
@@ -81,5 +108,15 @@ impl<'a, M: Send + 'a> Appliance<M> {
             Err(_) => Err(Error::HandlingFailure),
             Ok(_) => Ok(()),
         }
+    }
+
+    /// Returns the number of strong pointers (clones) of a given appliance.
+    pub fn strong_count(this: &Self) -> usize {
+        this.inner().strong.load(Ordering::SeqCst)
+    }
+
+    #[inline]
+    fn inner(&self) -> &Inner {
+        unsafe { self.ptr.as_ref() }
     }
 }

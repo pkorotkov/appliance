@@ -1,6 +1,7 @@
 # Appliance
 
 [![Cargo](https://img.shields.io/crates/v/appliance.svg)](https://crates.io/crates/appliance)
+[![Documentation](https://docs.rs/appliance/badge.svg)](https://docs.rs/appliance)
 ![minimum rustc 1.49](https://img.shields.io/badge/rustc-1.49+-red.svg)
 
 ## Overview
