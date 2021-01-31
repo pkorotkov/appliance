@@ -1,6 +1,6 @@
 [package]
 name = "appliance"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2018"
 authors = ["Pavel Korotkov <pkorotkov@gmail.com>"]
 description = "A lightweight framework to build components with message-based intercommunications."
@@ -17,3 +17,4 @@ flume = "0.10.1"
 futures-lite = "1.11.3"
 once_cell = "1.5.2"
 num_cpus = "1.13.0"
+smallbox = "0.8"

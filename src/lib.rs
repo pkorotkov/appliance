@@ -3,19 +3,19 @@
 
 #![warn(missing_docs, missing_debug_implementations, rust_2018_idioms)]
 
+#[macro_use]
+extern crate smallbox;
+
 use async_io::block_on;
 use flume::{bounded, unbounded, Sender};
 use futures_lite::future::pending;
 use once_cell::sync::Lazy;
-use std::{
-    panic::catch_unwind,
-    process::abort,
-    ptr::NonNull,
-    sync::atomic::{AtomicUsize, Ordering},
-    thread,
-};
+use smallbox::SmallBox;
+use std::{any::Any, panic::catch_unwind, thread};
 
-const MAX_REFCOUNT: usize = (isize::MAX) as usize;
+/// A size of the capacity reserved for storing objects on stack.
+/// It's currently 32 * sizeof(usize) = 32 * 8 = 256 bytes.
+type Space = smallbox::space::S32;
 
 /// An async executor.
 pub type Executor<'a> = async_executor::Executor<'a>;
@@ -41,61 +41,44 @@ pub enum Error {
     HandlingFailure,
 }
 
-#[repr(C)]
-struct Inner {
-    strong: AtomicUsize,
-}
-
-unsafe impl Send for Inner {}
-unsafe impl Sync for Inner {}
-
 /// A stateful entity that only allows to
 /// interact with via handling messages.
 #[derive(Debug)]
-pub struct Appliance<M> {
-    ptr: NonNull<Inner>,
-    messages_in: Sender<M>,
+pub struct Appliance {
+    messages_in: Sender<SmallBox<dyn Any + Send, Space>>,
 }
 
-unsafe impl<M> Send for Appliance<M> {}
-unsafe impl<M> Sync for Appliance<M> {}
+impl<'a> Appliance {
+    /// Creates a new appliance with a bounded message buffer.
+    pub fn new_bounded<S: Send + 'a, M: Send + 'static>(
+        executor: &Executor<'a>,
+        state: S,
+        handler: impl Fn(&mut S, M) + Send + 'a,
+        message_bus_size: usize,
+    ) -> Self {
+        Self::new(executor, state, handler, Some(message_bus_size))
+    }
 
-impl<M> Clone for Appliance<M> {
-    fn clone(&self) -> Self {
-        // NB: See std::sync::Arc source code for details.
-        let old_size = self.inner().strong.fetch_add(1, Ordering::Relaxed);
-        if old_size > MAX_REFCOUNT {
-            abort();
+    /// Creates a new appliance with an unbounded message buffer.
+    pub fn new_unbounded<S: Send + 'a, M: Send + 'static>(
+        executor: &Executor<'a>,
+        state: S,
+        handler: impl Fn(&mut S, M) + Send + 'a,
+    ) -> Self {
+        Self::new(executor, state, handler, None)
+    }
+
+    /// Processes a message on the current appliance.
+    pub fn handle<M: Send + 'static>(&self, message: M) -> Result<(), Error> {
+        let m: SmallBox<dyn Any + Send, Space> = smallbox!(message);
+        match self.messages_in.try_send(m) {
+            Err(_) => Err(Error::HandlingFailure),
+            _ => Ok(()),
         }
-        Appliance {
-            ptr: self.ptr,
-            messages_in: self.messages_in.clone(),
-        }
-    }
-}
-
-impl<M> Drop for Appliance<M> {
-    #[inline]
-    fn drop(&mut self) {
-        self.inner().strong.fetch_sub(1, Ordering::Release);
-    }
-}
-
-impl<M> Appliance<M> {
-    /// Returns the number of strong pointers (clones) of a given appliance.
-    pub fn strong_count(this: &Self) -> usize {
-        this.inner().strong.load(Ordering::SeqCst)
     }
 
-    #[inline]
-    fn inner(&self) -> &Inner {
-        unsafe { self.ptr.as_ref() }
-    }
-}
-
-impl<'a, M: Send + 'a> Appliance<M> {
     /// Creates a new appliance.
-    pub fn new<S: Send + 'a>(
+    fn new<S: Send + 'a, M: Send + 'static>(
         executor: &Executor<'a>,
         mut state: S,
         handler: impl Fn(&mut S, M) + Send + 'a,
@@ -106,29 +89,21 @@ impl<'a, M: Send + 'a> Appliance<M> {
         } else {
             unbounded()
         };
-        let boxed_inner = Box::new(Inner {
-            strong: AtomicUsize::new(1),
-        });
-        let ptr = Box::leak(boxed_inner).into();
-        let appliance = Appliance { ptr, messages_in };
+        let appliance = Appliance { messages_in };
         executor
             .spawn(async move {
                 loop {
                     match messages_out.recv_async().await {
-                        Ok(message) => handler(&mut state, message),
-                        Err(_) => return,
+                        Ok(message) => {
+                            if let Ok(m) = message.downcast::<M>() {
+                                handler(&mut state, m.into_inner());
+                            }
+                        }
+                        _ => return,
                     }
                 }
             })
             .detach();
         appliance
-    }
-
-    /// Processes a message on the current appliance.
-    pub fn handle(&self, message: M) -> Result<(), Error> {
-        match self.messages_in.try_send(message) {
-            Err(_) => Err(Error::HandlingFailure),
-            Ok(_) => Ok(()),
-        }
     }
 }

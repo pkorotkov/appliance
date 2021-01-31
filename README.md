@@ -6,7 +6,23 @@
 
 ## Overview
 
-Appliance is a lightweight Rust framework for building highly customizable asynchronous components adapted for message-based intercommunications. This project is an attempt to simplify actix-like approach exempting a user from using predefined execution runtimes. With the library you can design any composition logic for async agents avoiding data races and unnecessary locks.
+Appliance is a lightweight Rust framework for building highly customizable asynchronous components adapted for message-based intercommunications. This project is an attempt to make actix-like approach more flexible by exempting a user from using predefined execution runtimes. With the library you can design any composition logic for async agents avoiding data races and unnecessary locks.
+
+__Features__
+
+* Explicit control over agent lifecycle (no global runtime).
+* Equipping agents with customized async executors.
+* Minimal overhead when calling handlers (no traits used).
+* Use of stack for small messages.
+
+## Installation
+
+The recommended way to use this library is to add it as a dependency in your `Cargo.toml` file:
+
+```
+[dependencies]
+appliance = "0.1.4"
+```
 
 ## A quick ping-pong example
 
@@ -18,22 +34,14 @@ use std::{
     time::Duration,
 };
 
-type PingAppliance = Appliance<PingMessage>;
-type PongAppliance = Appliance<PongMessage>;
-
 enum PingMessage {
-    RegisterPong(Weak<PongAppliance>),
+    RegisterPong(Weak<Appliance>),
     Send(i16),
 }
 
+#[derive(Default)]
 struct PingState {
-    pong: Weak<PongAppliance>,
-}
-
-impl Drop for PingState {
-    fn drop(&mut self) {
-        println!("dropping PingState");
-    }
+    pong: Weak<Appliance>,
 }
 
 fn ping_handler(state: &mut PingState, message: PingMessage) {
@@ -50,18 +58,13 @@ fn ping_handler(state: &mut PingState, message: PingMessage) {
 }
 
 enum PongMessage {
-    RegisterPing(Weak<PingAppliance>),
+    RegisterPing(Weak<Appliance>),
     Send(i16),
 }
 
+#[derive(Default)]
 struct PongState {
-    ping: Weak<PingAppliance>,
-}
-
-impl Drop for PongState {
-    fn drop(&mut self) {
-        println!("dropping PongState");
-    }
+    ping: Weak<Appliance>,
 }
 
 fn pong_handler(state: &mut PongState, message: PongMessage) {
@@ -80,31 +83,16 @@ fn pong_handler(state: &mut PongState, message: PongMessage) {
 fn main() {
     let executor = &appliance::DEFAULT_EXECUTOR;
     // Create ping appliance.
-    let ping_state = PingState {
-        pong: Default::default(),
-    };
-    let ping = Arc::new(Appliance::new(executor, ping_state, ping_handler, None));
+    let ping_state: PingState = Default::default();
+    let ping = Arc::new(Appliance::new_unbounded(executor, ping_state, ping_handler));
     // Create pong appliance.
-    let pong_state = PongState {
-        ping: Default::default(),
-    };
-    let pong = Arc::new(Appliance::new(executor, pong_state, pong_handler, None));
+    let pong_state: PongState = Default::default();
+    let pong = Arc::new(Appliance::new_unbounded(executor, pong_state, pong_handler));
+    // Cross-register appliances.
     let _ = ping.handle(PingMessage::RegisterPong(Arc::downgrade(&pong)));
     let _ = pong.handle(PongMessage::RegisterPing(Arc::downgrade(&ping)));
     // Ignite ping-pong.
     let _ = ping.handle(PingMessage::Send(0));
     thread::sleep(Duration::from_secs(5));
-    drop(ping);
-    drop(pong);
-    thread::sleep(Duration::from_secs(1));
 }
-```
-
-## Installation
-
-The recommended way to use this library is to add it as a dependency in your `Cargo.toml` file:
-
-```
-[dependencies]
-appliance = "0.1.1"
 ```
