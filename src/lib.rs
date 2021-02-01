@@ -3,19 +3,11 @@
 
 #![warn(missing_docs, missing_debug_implementations, rust_2018_idioms)]
 
-#[macro_use]
-extern crate smallbox;
-
 use async_io::block_on;
 use flume::{bounded, unbounded, Sender};
 use futures_lite::future::pending;
 use once_cell::sync::Lazy;
-use smallbox::SmallBox;
-use std::{any::Any, panic::catch_unwind, thread};
-
-/// A size of the capacity reserved for storing objects on stack.
-/// It's currently 32 * sizeof(usize) = 32 * 8 = 256 bytes.
-type Space = smallbox::space::S32;
+use std::{panic::catch_unwind, thread};
 
 /// An async executor.
 pub type Executor<'a> = async_executor::Executor<'a>;
@@ -34,33 +26,26 @@ pub static DEFAULT_EXECUTOR: Lazy<Executor<'_>> = Lazy::new(|| {
     Executor::new()
 });
 
-/// An opaqueing error.
-#[derive(Debug)]
-pub enum Error {
-    /// Exposes message handling errors.
-    HandlingFailure,
-}
-
 /// A stateful entity that only allows to
 /// interact with via handling messages.
 #[derive(Debug)]
-pub struct Appliance {
-    messages_in: Sender<SmallBox<dyn Any + Send, Space>>,
+pub struct Appliance<M> {
+    messages_in: Sender<M>,
 }
 
-impl<'a> Appliance {
+impl<'a, M: Send + 'static> Appliance<M> {
     /// Creates a new appliance with a bounded message buffer.
-    pub fn new_bounded<S: Send + 'a, M: Send + 'static>(
+    pub fn new_bounded<S: Send + 'a>(
         executor: &Executor<'a>,
         state: S,
         handler: impl Fn(&mut S, M) + Send + 'a,
-        message_bus_size: usize,
+        size: usize,
     ) -> Self {
-        Self::new(executor, state, handler, Some(message_bus_size))
+        Self::new(executor, state, handler, Some(size))
     }
 
     /// Creates a new appliance with an unbounded message buffer.
-    pub fn new_unbounded<S: Send + 'a, M: Send + 'static>(
+    pub fn new_unbounded<S: Send + 'a>(
         executor: &Executor<'a>,
         state: S,
         handler: impl Fn(&mut S, M) + Send + 'a,
@@ -68,17 +53,16 @@ impl<'a> Appliance {
         Self::new(executor, state, handler, None)
     }
 
-    /// Processes a message on the current appliance.
-    pub fn handle<M: Send + 'static>(&self, message: M) -> Result<(), Error> {
-        let m: SmallBox<dyn Any + Send, Space> = smallbox!(message);
-        match self.messages_in.try_send(m) {
-            Err(_) => Err(Error::HandlingFailure),
-            _ => Ok(()),
+    /// Sends a message to the current appliance for processing.
+    pub fn send(&self, message: M) -> bool {
+        match self.messages_in.try_send(message) {
+            Err(_) => false,
+            _ => true,
         }
     }
 
     /// Creates a new appliance.
-    fn new<S: Send + 'a, M: Send + 'static>(
+    fn new<S: Send + 'a>(
         executor: &Executor<'a>,
         mut state: S,
         handler: impl Fn(&mut S, M) + Send + 'a,
@@ -94,11 +78,7 @@ impl<'a> Appliance {
             .spawn(async move {
                 loop {
                     match messages_out.recv_async().await {
-                        Ok(message) => {
-                            if let Ok(m) = message.downcast::<M>() {
-                                handler(&mut state, m.into_inner());
-                            }
-                        }
+                        Ok(message) => handler(&mut state, message),
                         _ => return,
                     }
                 }
