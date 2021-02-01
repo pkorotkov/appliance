@@ -13,7 +13,6 @@ __Features__
 * Explicit control over agent lifecycle (no global runtime).
 * Equipping agents with customized async executors.
 * Minimal overhead when calling handlers (no traits used).
-* Use of stack for small messages.
 
 ## Installation
 
@@ -21,7 +20,7 @@ The recommended way to use this library is to add it as a dependency in your `Ca
 
 ```
 [dependencies]
-appliance = "0.1.4"
+appliance = "0.1.5"
 ```
 
 ## A quick ping-pong example
@@ -35,13 +34,13 @@ use std::{
 };
 
 enum PingMessage {
-    RegisterPong(Weak<Appliance>),
+    RegisterPong(Weak<Appliance<PongMessage>>),
     Send(i16),
 }
 
 #[derive(Default)]
 struct PingState {
-    pong: Weak<Appliance>,
+    pong: Weak<Appliance<PongMessage>>,
 }
 
 fn ping_handler(state: &mut PingState, message: PingMessage) {
@@ -50,7 +49,7 @@ fn ping_handler(state: &mut PingState, message: PingMessage) {
         PingMessage::Send(c) => {
             if let Some(pong) = &state.pong.upgrade() {
                 println!("ping received {}", c);
-                let _ = pong.handle(PongMessage::Send(c + 1));
+                let _ = pong.send(PongMessage::Send(c + 1));
                 thread::sleep(Duration::from_secs(1));
             }
         }
@@ -58,13 +57,13 @@ fn ping_handler(state: &mut PingState, message: PingMessage) {
 }
 
 enum PongMessage {
-    RegisterPing(Weak<Appliance>),
+    RegisterPing(Weak<Appliance<PingMessage>>),
     Send(i16),
 }
 
 #[derive(Default)]
 struct PongState {
-    ping: Weak<Appliance>,
+    ping: Weak<Appliance<PingMessage>>,
 }
 
 fn pong_handler(state: &mut PongState, message: PongMessage) {
@@ -73,7 +72,7 @@ fn pong_handler(state: &mut PongState, message: PongMessage) {
         PongMessage::Send(c) => {
             if let Some(ping) = &state.ping.upgrade() {
                 println!("pong received {}", c);
-                let _ = ping.handle(PingMessage::Send(c + 1));
+                let _ = ping.send(PingMessage::Send(c + 1));
                 thread::sleep(Duration::from_secs(1));
             }
         }
@@ -89,10 +88,10 @@ fn main() {
     let pong_state: PongState = Default::default();
     let pong = Arc::new(Appliance::new_unbounded(executor, pong_state, pong_handler));
     // Cross-register appliances.
-    let _ = ping.handle(PingMessage::RegisterPong(Arc::downgrade(&pong)));
-    let _ = pong.handle(PongMessage::RegisterPing(Arc::downgrade(&ping)));
+    let _ = ping.send(PingMessage::RegisterPong(Arc::downgrade(&pong)));
+    let _ = pong.send(PongMessage::RegisterPing(Arc::downgrade(&ping)));
     // Ignite ping-pong.
-    let _ = ping.handle(PingMessage::Send(0));
+    let _ = ping.send(PingMessage::Send(0));
     thread::sleep(Duration::from_secs(5));
 }
 ```
