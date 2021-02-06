@@ -20,7 +20,7 @@ The recommended way to use this library is to add it as a dependency in your `Ca
 
 ```
 [dependencies]
-appliance = "0.1.5"
+appliance = "0.1.6"
 ```
 
 ## A quick ping-pong example
