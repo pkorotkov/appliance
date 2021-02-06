@@ -3,11 +3,37 @@
 
 #![warn(missing_docs, missing_debug_implementations, rust_2018_idioms)]
 
-use async_io::block_on;
-use flume::{bounded, unbounded, Sender};
-use futures_lite::future::pending;
-use once_cell::sync::Lazy;
-use std::{panic::catch_unwind, thread};
+use std::{error, fmt, panic::catch_unwind, thread};
+use {
+    async_io::block_on,
+    event_listener::Event,
+    flume::{bounded, unbounded, Sender, TrySendError},
+    futures_lite::future::pending,
+    once_cell::sync::Lazy,
+};
+
+/// An error describing appliance failures.
+#[derive(Debug)]
+pub enum Error {
+    /// Indicates that a message was not sent because
+    /// of the appliance's buffer being full.
+    FullBuffer,
+    /// Indicates that the appliance's handling loop is stopped.
+    /// This is a fatal failure which signals that the appliance is
+    /// irreparable and should not be further used.
+    Stopped,
+}
+
+impl error::Error for Error {}
+
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Error::FullBuffer => write!(f, "appliance buffer is full"),
+            Error::Stopped => write!(f, "appliance is stopped"),
+        }
+    }
+}
 
 /// An async executor.
 pub type Executor<'a> = async_executor::Executor<'a>;
@@ -30,11 +56,12 @@ pub static DEFAULT_EXECUTOR: Lazy<Executor<'_>> = Lazy::new(|| {
 /// interact with via handling messages.
 #[derive(Debug)]
 pub struct Appliance<M> {
-    messages_in: Sender<M>,
+    in_: Sender<(M, Option<Event>)>,
 }
 
 impl<'a, M: Send + 'static> Appliance<M> {
-    /// Creates a new appliance with a bounded message buffer.
+    /// Creates a new appliance with a bounded message buffer,
+    /// a state, and a handler.
     pub fn new_bounded<S: Send + 'a>(
         executor: &Executor<'a>,
         state: S,
@@ -44,7 +71,8 @@ impl<'a, M: Send + 'static> Appliance<M> {
         Self::new(executor, state, handler, Some(size))
     }
 
-    /// Creates a new appliance with an unbounded message buffer.
+    /// Creates a new appliance with an unbounded message buffer,
+    /// a state, and a handler.
     pub fn new_unbounded<S: Send + 'a>(
         executor: &Executor<'a>,
         state: S,
@@ -53,12 +81,27 @@ impl<'a, M: Send + 'static> Appliance<M> {
         Self::new(executor, state, handler, None)
     }
 
-    /// Sends a message to the current appliance for processing.
-    pub fn send(&self, message: M) -> bool {
-        match self.messages_in.try_send(message) {
-            Err(_) => false,
-            _ => true,
+    /// Sends a message to the current appliance without
+    /// waiting for the message to be handled.
+    pub fn send(&self, message: M) -> Result<(), Error> {
+        to_result(self.in_.try_send((message, None)))
+    }
+
+    /// Sends a message to the current appliance and waits
+    /// indefinitely for the message to be handled.
+    /// This blocking method is a fit for callers who
+    /// must be assured that the message has been handled.
+    /// It is supposed to be used less often then `send` as
+    /// it may suffer a performance hit due to synchronization
+    /// with the handling loop.
+    pub fn send_and_wait(&self, message: M) -> Result<(), Error> {
+        let event = Event::new();
+        let event_listener = event.listen();
+        let result = to_result(self.in_.try_send((message, Some(event))));
+        if result.is_ok() {
+            event_listener.wait();
         }
+        result
     }
 
     /// Creates a new appliance.
@@ -66,24 +109,37 @@ impl<'a, M: Send + 'static> Appliance<M> {
         executor: &Executor<'a>,
         mut state: S,
         handler: impl Fn(&mut S, M) + Send + 'a,
-        message_bus_size: Option<usize>,
+        size: Option<usize>,
     ) -> Self {
-        let (messages_in, messages_out) = if let Some(mbs) = message_bus_size {
+        let (in_, out_) = if let Some(mbs) = size {
             bounded(mbs)
         } else {
             unbounded()
         };
-        let appliance = Appliance { messages_in };
+        let appliance = Appliance { in_ };
         executor
             .spawn(async move {
                 loop {
-                    match messages_out.recv_async().await {
-                        Ok(message) => handler(&mut state, message),
+                    match out_.recv_async().await {
+                        Ok((message, event)) => {
+                            handler(&mut state, message);
+                            if let Some(event) = event {
+                                event.notify(1);
+                            }
+                        }
                         _ => return,
                     }
                 }
             })
             .detach();
         appliance
+    }
+}
+
+fn to_result<T>(res: Result<(), TrySendError<T>>) -> Result<(), Error> {
+    match res {
+        Err(TrySendError::Full(_)) => Err(Error::FullBuffer),
+        Err(TrySendError::Disconnected(_)) => Err(Error::Stopped),
+        _ => Ok(()),
     }
 }
