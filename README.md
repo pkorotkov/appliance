@@ -20,7 +20,7 @@ The recommended way to use this library is to add it as a dependency in your `Ca
 
 ```
 [dependencies]
-appliance = "0.1.6"
+appliance = "0.1.7"
 ```
 
 ## A quick ping-pong example
@@ -34,13 +34,13 @@ use std::{
 };
 
 enum PingMessage {
-    RegisterPong(Weak<Appliance<PongMessage>>),
+    RegisterPong(Weak<Appliance>),
     Send(i16),
 }
 
 #[derive(Default)]
 struct PingState {
-    pong: Weak<Appliance<PongMessage>>,
+    pong: Weak<Appliance>,
 }
 
 fn ping_handler(state: &mut PingState, message: PingMessage) {
@@ -57,13 +57,13 @@ fn ping_handler(state: &mut PingState, message: PingMessage) {
 }
 
 enum PongMessage {
-    RegisterPing(Weak<Appliance<PingMessage>>),
+    RegisterPing(Weak<Appliance>),
     Send(i16),
 }
 
 #[derive(Default)]
 struct PongState {
-    ping: Weak<Appliance<PingMessage>>,
+    ping: Weak<Appliance>,
 }
 
 fn pong_handler(state: &mut PongState, message: PongMessage) {
