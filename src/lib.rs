@@ -304,40 +304,6 @@ impl<'a, A: ?Sized + 'a> ApplianceHandle<'a, A> {
         Ok(())
     }
 
-/*
-    /// Sends a message to the current appliance and waits
-    /// indefinitely for the message to be handled.
-    /// This blocking method is a fit for callers who
-    /// must be assured that the message has been handled.
-    /// It is supposed to be used less often then `send` as
-    /// it may suffer a performance hit due to synchronization
-    /// with the handling loop.
-    pub fn send_and_wait<M>(&self, message: M) -> Result<M::Result, Error>
-    where
-        M: HandledBy<A> + 'a,
-    {
-        self.send_and_wait_inner(message, None)
-    }
-
-    /// Sends a message to the current appliance and waits
-    /// for only given time (timeout) for the message to be
-    /// handled. This blocking method is a fit for callers
-    /// who must be assured that the message has been handled.
-    /// It is supposed to be used less often then `send` as
-    /// it may suffer a performance hit due to synchronization
-    /// with the handling loop.
-    pub fn send_and_wait_with_timeout<M>(
-        &self,
-        message: M,
-        timeout: Duration,
-    ) -> Result<M::Result, Error>
-    where
-        M: HandledBy<A> + 'a,
-    {
-        self.send_and_wait_inner(message, Some(timeout))
-    }
-*/
-
     /// Sends a message to the current appliance and waits
     /// forever, if `timeout` is None, or for only given time
     /// for the message to be handled.
