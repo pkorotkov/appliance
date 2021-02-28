@@ -15,7 +15,7 @@ use std::{
 use {
     async_io::block_on,
     flume::{bounded, unbounded, Receiver, Sender},
-    futures_lite::future::pending,
+    futures_lite::future::{or, pending},
     once_cell::sync::Lazy,
 };
 
@@ -106,10 +106,10 @@ pub trait Message: Send {
 ///
 /// fn main() -> Result<(), appliance::Error> {
 ///     let handle = Appliance::new_bounded(&DEFAULT_EXECUTOR, 0, BUF_SIZE);
-///     assert_eq!(*handle.send_and_wait(Ping)?, 1);
-///     assert_eq!(*handle.send_and_wait(Ping)?, 2);
+///     assert_eq!(*handle.send_and_wait_sync(Ping)?, 1);
+///     assert_eq!(*handle.send_and_wait_sync(Ping)?, 2);
 ///     handle.send(Reset)?;
-///     assert_eq!(*handle.send_and_wait(Ping)?, 1);
+///     assert_eq!(*handle.send_and_wait_sync(Ping)?, 1);
 ///     Ok(())
 /// }
 /// ```
@@ -352,7 +352,7 @@ impl<'a, A: ?Sized + 'a> ApplianceHandle<'a, A> {
                 async_io::Timer::after(timeout).await;
                 Err(Error::Timeout)
             };
-            futures_lite::future::or(f1, f2).await
+            or(f1, f2).await
         } else {
             recv.recv_async().await.map_err(|_| Error::UnexpectedFailure)
         }
