@@ -1,6 +1,6 @@
 [package]
 name = "appliance"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2018"
 authors = ["Pavel Korotkov <pkorotkov@gmail.com>"]
 description = "A lightweight framework to build components with message-based intercommunications."
@@ -20,7 +20,7 @@ async-io = "1.3.1"
 event-listener = "2.5.1"
 flume = "0.10.2"
 futures-lite = "1.11.3"
-once_cell = "1.7.0"
+once_cell = "1.7.2"
 num_cpus = "1.13.0"
 
 [dev-dependencies]
