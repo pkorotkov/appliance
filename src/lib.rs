@@ -14,7 +14,7 @@ use std::{
 };
 use {
     async_io::block_on,
-    flume::{bounded, unbounded, Receiver, Sender},
+    flume::{bounded, unbounded, Receiver, RecvTimeoutError, Sender, TrySendError},
     futures_lite::future::{or, pending},
     once_cell::sync::Lazy,
 };
@@ -154,15 +154,15 @@ struct InnerMessage<'a, H: ?Sized + 'a> {
 }
 
 impl<'a, H: ?Sized + 'a> InnerMessage<'a, H> {
-    fn new<M>(msg: M, reply_channel: Option<Sender<M::Result>>) -> Self
+    fn new<M>(message: M, reply_channel: Option<Sender<M::Result>>) -> Self
     where
-        M: HandledBy<H> + Message + 'a,
+        M: HandledBy<H> + 'a,
     {
         InnerMessage {
             handle_message: Box::new(move |handler| {
-                let result = msg.handle_by(handler);
-                if let Some(chan) = reply_channel {
-                    chan.send(result).ok();
+                let result = message.handle_by(handler);
+                if let Some(rc) = &reply_channel {
+                    rc.send(result).ok();
                 }
             }),
         }
@@ -204,7 +204,9 @@ where
     }
 
     /// Creates a new appliance with an unbounded message buffer,
-    /// a state, and a handler.
+    /// a state, and a handler. It's not recommended to use this
+    /// version of appliance in production just like any other
+    /// memory unbounded contruct.
     pub fn new_unbounded(executor: &'s Executor<'s>, state: S) -> ApplianceHandle<'s, Self> {
         Self::run(executor, state, None)
     }
@@ -296,12 +298,27 @@ impl<'a, A: ?Sized + 'a> Clone for ApplianceHandle<'a, A> {
 impl<'a, A: ?Sized + 'a> ApplianceHandle<'a, A> {
     /// Sends a message to the current appliance without
     /// waiting for the message to be handled.
-    pub fn send<M>(&self, message: M) -> Result<(), Error>
+    pub fn send_sync<M>(&self, message: M) -> Result<(), Error>
     where
         M: HandledBy<A> + 'a,
     {
-        self.inner.try_send(InnerMessage::new(message, None))?;
-        Ok(())
+        match self.inner.try_send(InnerMessage::new(message, None)) {
+            Ok(_) => Ok(()),
+            Err(TrySendError::Full(_)) => Err(Error::FullBuffer),
+            Err(TrySendError::Disconnected(_)) => Err(Error::UnexpectedFailure),
+        }
+    }
+
+    /// Does conceptually the same thing as `send_sync` but gets intended
+    /// to be used in async context.
+    pub async fn send_async<M>(&self, message: M) -> Result<(), Error>
+    where
+        M: HandledBy<A> + 'a,
+    {
+        self.inner
+            .send_async(InnerMessage::new(message, None))
+            .await
+            .map_err(|_| Error::UnexpectedFailure)
     }
 
     /// Sends a message to the current appliance and waits
@@ -310,7 +327,7 @@ impl<'a, A: ?Sized + 'a> ApplianceHandle<'a, A> {
     /// This synchronous blocking method is a fit for callers
     /// who don't use async execution and must be assured that
     /// the message has been handled.
-    /// Note, it is supposed to be used less often then `send`
+    /// Note, it is supposed to be used less often than `send`
     /// as it may suffer a significant performance hit due to
     /// synchronization with the handling loop.
     pub fn send_and_wait_sync<M>(
@@ -321,18 +338,26 @@ impl<'a, A: ?Sized + 'a> ApplianceHandle<'a, A> {
     where
         M: HandledBy<A> + 'a,
     {
-        let (send, recv) = bounded(1);
-        self.inner
-            .try_send(InnerMessage::new(message, Some(send)))?; 
+        let (s, r) = bounded(1);
+        match self.inner.try_send(InnerMessage::new(message, Some(s))) {
+            Err(TrySendError::Full(_)) => return Err(Error::FullBuffer),
+            Err(TrySendError::Disconnected(_)) => return Err(Error::UnexpectedFailure),
+            _ => {}
+        }
         if let Some(timeout) = timeout {
-            recv.recv_timeout(timeout).map_err(|_| Error::Timeout)
+            match r.recv_timeout(timeout) {
+                Ok(r) => Ok(r),
+                Err(RecvTimeoutError::Timeout) => Err(Error::Timeout),
+                Err(RecvTimeoutError::Disconnected) => Err(Error::UnexpectedFailure),
+            }
         } else {
-            recv.recv().map_err(|_| Error::UnexpectedFailure)
+            r.recv().map_err(|_| Error::UnexpectedFailure)
         }
     }
 
     /// Does conceptually the same thing as `send_and_wait_sync`
-    /// but gets intended to be used in async context.
+    /// but gets intended to be used in async context. This method
+    /// is well suited for waiting for a result.
     pub async fn send_and_wait_async<M>(
         &self,
         message: M,
@@ -342,11 +367,18 @@ impl<'a, A: ?Sized + 'a> ApplianceHandle<'a, A> {
         M: HandledBy<A> + 'a,
     {
         let (send, recv) = bounded(1);
-        self.inner
-            .try_send(InnerMessage::new(message, Some(send)))?;
+        if let Err(_) = self
+            .inner
+            .send_async(InnerMessage::new(message, Some(send)))
+            .await
+        {
+            return Err(Error::UnexpectedFailure);
+        }
         if let Some(timeout) = timeout {
             let f1 = async {
-                recv.recv_async().await.map_err(|_| Error::UnexpectedFailure)
+                recv.recv_async()
+                    .await
+                    .map_err(|_| Error::UnexpectedFailure)
             };
             let f2 = async {
                 async_io::Timer::after(timeout).await;
@@ -354,7 +386,9 @@ impl<'a, A: ?Sized + 'a> ApplianceHandle<'a, A> {
             };
             or(f1, f2).await
         } else {
-            recv.recv_async().await.map_err(|_| Error::UnexpectedFailure)
+            recv.recv_async()
+                .await
+                .map_err(|_| Error::UnexpectedFailure)
         }
     }
 }
