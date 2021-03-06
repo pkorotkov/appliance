@@ -86,7 +86,7 @@ pub fn set_bitvec(c: &mut Criterion) {
     let msg_count: usize = black_box(1_000_000);
     let benchmark = |handle: ApplianceHandle<BenchAppliance>| {
         for i in 0..msg_count {
-            handle.send(messages::SetValue(i))?;
+            handle.send_sync(messages::SetValue(i))?;
         }
         let success = handle.send_and_wait_sync(messages::Validate, None)?;
         if !success {
