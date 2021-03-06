@@ -21,7 +21,7 @@ use {
 
 pub use crate::error::Error;
 
-/// An async executor.
+/// An async executor with a customized execution dedication per task.
 pub type Executor<'a> = async_executor::Executor<'a>;
 
 /// A default executor. It runs on per-core threads and is fair
@@ -45,7 +45,7 @@ pub static DEFAULT_EXECUTOR: Lazy<Executor<'static>> = Lazy::new(|| {
 /// # Example
 /// ```
 /// # use std::time::Duration;
-/// # use appliance::{Appliance, ApplianceHandle, Handler, Message};
+/// # use appliance::{Appliance, Descriptor, Handler, Message};
 /// type Counter = Appliance<'static, usize>;
 ///
 /// struct Ping;
@@ -59,8 +59,8 @@ pub static DEFAULT_EXECUTOR: Lazy<Executor<'static>> = Lazy::new(|| {
 ///     }
 /// }
 ///
-/// fn do_ping(handle: ApplianceHandle<Counter>) {
-///     match handle.send_and_wait_with_timeout(Ping, Duration::from_secs(10)) {
+/// fn do_ping(descriptor: Descriptor<Counter>) {
+///     match descriptor.send_and_wait_with_timeout(Ping, Duration::from_secs(10)) {
 ///         Ok(cnt) => println!("Appliance was pinged successfully {} times", *cnt),
 ///         Err(err) => panic!("Ping to appliance has failed: {}", err),
 ///     }
@@ -81,7 +81,7 @@ pub trait Message: Send {
 /// # Example
 /// ```
 /// # use std::time::Duration;
-/// # use appliance::{Appliance, ApplianceHandle, DEFAULT_EXECUTOR, Handler, Message};
+/// # use appliance::{Appliance, Descriptor, DEFAULT_EXECUTOR, Handler, Message};
 /// type Counter = Appliance<'static, usize>;
 ///
 /// struct Ping;
@@ -108,26 +108,26 @@ pub trait Message: Send {
 /// const BUF_SIZE: usize = 10;
 ///
 /// fn main() -> Result<(), appliance::Error> {
-///     let handle = Appliance::new_bounded(&DEFAULT_EXECUTOR, 0, BUF_SIZE);
-///     assert_eq!(*handle.send_and_wait_sync(Ping)?, 1);
-///     assert_eq!(*handle.send_and_wait_sync(Ping)?, 2);
-///     handle.send(Reset)?;
-///     assert_eq!(*handle.send_and_wait_sync(Ping)?, 1);
+///     let descriptor = Appliance::new_bounded(&DEFAULT_EXECUTOR, 0, BUF_SIZE);
+///     assert_eq!(*descriptor.send_and_wait_sync(Ping)?, 1);
+///     assert_eq!(*descriptor.send_and_wait_sync(Ping)?, 2);
+///     descriptor.send(Reset)?;
+///     assert_eq!(*descriptor.send_and_wait_sync(Ping)?, 1);
 ///     Ok(())
 /// }
 /// ```
 pub trait Handler<M: Message> {
-    /// Handle the incoming message
+    /// Handle the incoming message.
     fn handle(&mut self, msg: M) -> M::Result;
 }
 
 /// A dual trait for `Handler`. For any type of messages `M` and any type of handlers `H`,
-/// if `impl Handle<M> for H`, then `impl HandledBy<H> for M`. I.e. we can either ask
+/// if `impl Handler<M> for H`, then `impl HandledBy<H> for M`. I.e. we can either ask
 /// "which messages can be handled by this appliance" or "which actors can handle this message",
 /// and the answers to these questions are dual. The trait `HandledBy` answers the second
 /// question.
 ///
-/// Normally one should always implement `Handle<M>`, unless for some reason it is impossible
+/// Normally one should always implement `Handler<M>`, unless for some reason it is impossible
 /// to do. The dual `HandledBy` impl is then provided automatically.
 ///
 /// Generic methods, on the other hand, should use the trait constraint `T: HandledBy<H>`, since
@@ -177,13 +177,13 @@ type MessageSender<'a, H> = Sender<InnerMessage<'a, H>>;
 /// A stateful entity that only allows to interact with via handling messages.
 ///
 /// The appliance itself is not directly available. Messages must be sent to it
-/// using its handle which is returned by the `Appliance::new_bounded` and
+/// using its descriptor which is returned by the `Appliance::new_bounded` and
 /// `Appliance::new_unbounded` methods, and can also be obtained from `&Appliance`
-/// using `Appliance::handle` method. Note that the latter route is generally
+/// using `Appliance::descriptor` method. Note that the latter route is generally
 /// available only for message handler `Handler` implementations.
 pub struct Appliance<'s, S> {
     state: S,
-    handle: Weak<MessageSender<'s, Self>>,
+    descriptor: Weak<MessageSender<'s, Self>>,
 }
 
 impl<'s, S: Debug + 's> Debug for Appliance<'s, S> {
@@ -202,7 +202,7 @@ where
         executor: &'s Executor<'s>,
         state: S,
         size: usize,
-    ) -> ApplianceHandle<'s, Self> {
+    ) -> Descriptor<'s, Self> {
         Self::run(executor, state, size)
     }
 
@@ -210,7 +210,7 @@ where
     /// a state, and a handler. It's not recommended to use this
     /// version of appliance in production just like any other
     /// memory unbounded contruct.
-    pub fn new_unbounded(executor: &'s Executor<'s>, state: S) -> ApplianceHandle<'s, Self> {
+    pub fn new_unbounded(executor: &'s Executor<'s>, state: S) -> Descriptor<'s, Self> {
         Self::run(executor, state, None)
     }
 
@@ -220,41 +220,40 @@ where
         executor: &'s Executor<'s>,
         state: S,
         size: impl Into<Option<usize>>,
-    ) -> ApplianceHandle<'s, Self> {
+    ) -> Descriptor<'s, Self> {
         let (in_, out_) = if let Some(mbs) = size.into() {
             bounded(mbs)
         } else {
             unbounded()
         };
-        let handle = ApplianceHandle {
-            inner: Arc::new(in_),
-        };
+        let descriptor = Descriptor { inner: Arc::new(in_) };
         let mut appliance = Appliance {
             state,
-            handle: Arc::downgrade(&handle.inner),
+            descriptor: Arc::downgrade(&descriptor.inner),
         };
         executor
             .spawn(async move { appliance.handle_messages(out_).await })
             .detach();
-        handle
+        descriptor
     }
 
-    /// Returns a handle object of the appliance.
+    /// Returns a descriptor object of the appliance.
     ///
-    /// A handle is a cloneable object which allows to send messages to the appliance.
+    /// Any descriptor is a cloneable object which allows to send messages to the appliance.
     ///
-    /// This function will return `None` if all appliance handles were already dropped.
-    /// In this case the appliance must shutdown.
-    pub fn handle(&'s self) -> Option<ApplianceHandle<'s, Self>> {
-        self.handle.upgrade().map(|inner| ApplianceHandle { inner })
+    /// This function will return `None` if all appliance descriptors have already been dropped.
+    /// In this case the appliance becomes unusable.
+    pub fn descriptor(&'s self) -> Option<Descriptor<'s, Self>> {
+        self.descriptor.upgrade().map(|inner| Descriptor { inner })
     }
 
     /// The mutable inner state of the appliance.
     ///
     /// Note that this function requires mutable access to the appliance itself (not its
-    /// handle), but the appliance object is never returned by the API. The only place where
-    /// the appliance can be accessed is the implementation of `Handle` and `HandledBy` traits
-    /// for the message types, which is thus also the only place where one can (and should) mutate its state.
+    /// descriptor), but the appliance object is never returned by the API. The only place where
+    /// the appliance can be accessed is the implementation of `Handler` and `HandledBy` traits
+    /// for the message types, which is thus also the only place where one can (and should) mutate
+    /// its state.
     pub fn state(&mut self) -> &mut S {
         &mut self.state
     }
@@ -266,11 +265,11 @@ where
     }
 }
 
-/// Appliance handle is a cloneable object which allows to send messages to the appliance.
+/// Appliance descriptor is a cloneable object which allows to send messages to the appliance.
 ///
-/// Once all handles to the appliance are dropped, the appliance will terminate its event loop
-/// and be destroyed.
-pub struct ApplianceHandle<'a, A: ?Sized> {
+/// Once all descriptors to the appliance are dropped, the appliance will terminate its event
+/// loop and be destroyed.
+pub struct Descriptor<'a, A: ?Sized> {
     /// The incoming channel which is used to send messages to the appliance.
     ///
     /// We are forced to stupidly wrap `Sender` in an `Arc` even though it already is a
@@ -279,26 +278,26 @@ pub struct ApplianceHandle<'a, A: ?Sized> {
     /// in the API.
     ///
     /// Make sure that the inner `Sender` is never leaked outside of the containing `Arc`. If that
-    /// happens, the appliance will stay alive after all handles are dropped, which violates the
-    /// API contract.
+    /// happens, the appliance will stay alive after all descriptors are dropped, which violates
+    /// the API contract.
     inner: Arc<MessageSender<'a, A>>,
 }
 
-impl<'a, A: ?Sized + 'a> Debug for ApplianceHandle<'a, A> {
+impl<'a, A: ?Sized + 'a> Debug for Descriptor<'a, A> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "ApplianceHandle<{}>(..)", type_name::<A>())
+        write!(f, "Descriptor<{}>(..)", type_name::<A>())
     }
 }
 
-impl<'a, A: ?Sized + 'a> Clone for ApplianceHandle<'a, A> {
+impl<'a, A: ?Sized + 'a> Clone for Descriptor<'a, A> {
     fn clone(&self) -> Self {
-        ApplianceHandle {
+        Descriptor {
             inner: self.inner.clone(),
         }
     }
 }
 
-impl<'a, A: ?Sized + 'a> ApplianceHandle<'a, A> {
+impl<'a, A: ?Sized + 'a> Descriptor<'a, A> {
     /// Sends a message to the current appliance without
     /// waiting for the message to be handled.
     pub fn send_sync<M>(&self, message: M) -> Result<(), Error>

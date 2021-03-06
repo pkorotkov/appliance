@@ -2,7 +2,7 @@ use bit_vec::BitVec;
 use criterion::{black_box, criterion_group, criterion_main, BatchSize, Criterion};
 use thiserror::Error;
 
-use appliance::{Appliance, ApplianceHandle, Handler, DEFAULT_EXECUTOR};
+use appliance::{Appliance, Descriptor, Handler, DEFAULT_EXECUTOR};
 
 #[derive(Debug, Error)]
 pub enum Error {
@@ -84,11 +84,11 @@ impl State {
 
 pub fn set_bitvec(c: &mut Criterion) {
     let msg_count: usize = black_box(1_000_000);
-    let benchmark = |handle: ApplianceHandle<BenchAppliance>| {
+    let benchmark = |descriptor: Descriptor<BenchAppliance>| {
         for i in 0..msg_count {
-            handle.send_sync(messages::SetValue(i))?;
+            descriptor.send_sync(messages::SetValue(i))?;
         }
-        let success = handle.send_and_wait_sync(messages::Validate, None)?;
+        let success = descriptor.send_and_wait_sync(messages::Validate, None)?;
         if !success {
             panic!("Validation has failed. Not all bits are set.")
         }
