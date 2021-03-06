@@ -1,9 +1,9 @@
 [package]
 name = "appliance"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2018"
 authors = ["Pavel Korotkov <pkorotkov@gmail.com>"]
-description = "A lightweight framework to build components with message-based intercommunications."
+description = "A lightweight framework to build async-friendly components with message-based intercommunications."
 documentation = "https://docs.rs/appliance"
 homepage = "https://github.com/pkorotkov/appliance"
 repository = "https://github.com/pkorotkov/appliance"

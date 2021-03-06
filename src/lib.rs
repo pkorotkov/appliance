@@ -39,8 +39,8 @@ pub static DEFAULT_EXECUTOR: Lazy<Executor<'static>> = Lazy::new(|| {
     Executor::new()
 });
 
-/// `Message` must be implemented for any type which is intended for sending between
-/// the appliances.
+/// `Message` must be implemented for any type which is intended for
+/// sending to appliances.
 ///
 /// # Example
 /// ```
@@ -73,7 +73,10 @@ pub trait Message: Send {
 
 /// A trait which must be implemented for all appliances which are intended to receive
 /// messages of type `M`. One appliance can handle multiple message types.
-/// Handler's logic should include only fast and non-blocking mutations of the appliance state.
+/// 
+/// Handler's logic is strongly encouraged to include only fast (non-blocking) and synchronous
+/// mutations of the appliance state. Otherwise, the appliance's event loop may get slow, and
+/// hence flood the internal buffer causing message sending denials.
 ///
 /// # Example
 /// ```
@@ -242,7 +245,7 @@ where
     ///
     /// This function will return `None` if all appliance handles were already dropped.
     /// In this case the appliance must shutdown.
-    pub fn get_handle(&'s self) -> Option<ApplianceHandle<'s, Self>> {
+    pub fn handle(&'s self) -> Option<ApplianceHandle<'s, Self>> {
         self.handle.upgrade().map(|inner| ApplianceHandle { inner })
     }
 
