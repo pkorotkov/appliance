@@ -7,6 +7,7 @@ mod error;
 use std::{
     any::type_name,
     fmt::{self, Debug},
+    os::raw::c_void,
     panic::catch_unwind,
     sync::{Arc, Weak},
     thread,
@@ -14,7 +15,7 @@ use std::{
 };
 use {
     async_io::block_on,
-    flume::{bounded, unbounded, Receiver, RecvTimeoutError, Sender, TrySendError},
+    flume::{bounded, unbounded, Receiver, RecvTimeoutError, SendError, Sender, TrySendError},
     futures_lite::future::{or, pending},
     once_cell::sync::Lazy,
 };
@@ -73,7 +74,7 @@ pub trait Message: Send {
 
 /// A trait which must be implemented for all appliances which are intended to receive
 /// messages of type `M`. One appliance can handle multiple message types.
-/// 
+///
 /// Handler's logic is strongly encouraged to include only fast (non-blocking) and synchronous
 /// mutations of the appliance state. Otherwise, the appliance's event loop may get slow, and
 /// hence flood the internal buffer causing message sending denials.
@@ -123,7 +124,7 @@ pub trait Handler<M: Message> {
 
 /// A dual trait for `Handler`. For any type of messages `M` and any type of handlers `H`,
 /// if `impl Handler<M> for H`, then `impl HandledBy<H> for M`. I.e. we can either ask
-/// "which messages can be handled by this appliance" or "which actors can handle this message",
+/// "which messages can be handled by this appliance" or "which appliances can handle this message",
 /// and the answers to these questions are dual. The trait `HandledBy` answers the second
 /// question.
 ///
@@ -153,7 +154,7 @@ where
 }
 
 struct InnerMessage<'a, H: ?Sized + 'a> {
-    handle_message: Box<dyn FnOnce(&mut H) + Send + 'a>,
+    handle_message: Box<dyn FnOnce(Option<&mut H>) -> *mut c_void + Send + 'a>,
 }
 
 impl<'a, H: ?Sized + 'a> InnerMessage<'a, H> {
@@ -163,10 +164,15 @@ impl<'a, H: ?Sized + 'a> InnerMessage<'a, H> {
     {
         InnerMessage {
             handle_message: Box::new(move |handler| {
-                let result = message.handle_by(handler);
-                if let Some(rc) = &reply_channel {
-                    rc.send(result).ok();
+                if let Some(h) = handler {
+                    let result = message.handle_by(h);
+                    if let Some(rc) = reply_channel {
+                        rc.send(result).ok();
+                    }
+                    return std::ptr::null_mut();
                 }
+                let bm = Box::new(message);
+                Box::into_raw(bm) as *mut c_void
             }),
         }
     }
@@ -174,7 +180,7 @@ impl<'a, H: ?Sized + 'a> InnerMessage<'a, H> {
 
 type MessageSender<'a, H> = Sender<InnerMessage<'a, H>>;
 
-/// A stateful entity that only allows to interact with via handling messages.
+/// A stateful entity that only allows to interact with via sending messages.
 ///
 /// The appliance itself is not directly available. Messages must be sent to it
 /// using its descriptor which is returned by the `Appliance::new_bounded` and
@@ -198,11 +204,7 @@ where
 {
     /// Creates a new appliance with a bounded message buffer,
     /// a state, and a handler.
-    pub fn new_bounded(
-        executor: &'s Executor<'s>,
-        state: S,
-        size: usize,
-    ) -> Descriptor<'s, Self> {
+    pub fn new_bounded(executor: &'s Executor<'s>, state: S, size: usize) -> Descriptor<'s, Self> {
         Self::run(executor, state, size)
     }
 
@@ -226,7 +228,9 @@ where
         } else {
             unbounded()
         };
-        let descriptor = Descriptor { inner: Arc::new(in_) };
+        let descriptor = Descriptor {
+            inner: Arc::new(in_),
+        };
         let mut appliance = Appliance {
             state,
             descriptor: Arc::downgrade(&descriptor.inner),
@@ -260,7 +264,7 @@ where
 
     async fn handle_messages(&mut self, out_: Receiver<InnerMessage<'_, Self>>) {
         while let Ok(InnerMessage { handle_message }) = out_.recv_async().await {
-            handle_message(self);
+            handle_message(Some(self));
         }
     }
 }
@@ -300,27 +304,39 @@ impl<'a, A: ?Sized + 'a> Clone for Descriptor<'a, A> {
 impl<'a, A: ?Sized + 'a> Descriptor<'a, A> {
     /// Sends a message to the current appliance without
     /// waiting for the message to be handled.
-    pub fn send_sync<M>(&self, message: M) -> Result<(), Error>
+    pub fn send_sync<M>(&self, message: M) -> Result<(), Error<M>>
     where
         M: HandledBy<A> + 'a,
     {
         match self.inner.try_send(InnerMessage::new(message, None)) {
-            Ok(_) => Ok(()),
-            Err(TrySendError::Full(_)) => Err(Error::FullBuffer),
-            Err(TrySendError::Disconnected(_)) => Err(Error::UnexpectedFailure),
+            Err(TrySendError::Full(im)) => {
+                let p = (im.handle_message)(None);
+                let bm = unsafe { Box::from_raw(p as *mut M) };
+                Err(Error::FullBuffer(*bm))
+            }
+            Err(TrySendError::Disconnected(im)) => {
+                let p = (im.handle_message)(None);
+                let bm = unsafe { Box::from_raw(p as *mut M) };
+                Err(Error::UnexpectedFailure(Some(*bm)))
+            }
+            _ => Ok(()),
         }
     }
 
     /// Does conceptually the same thing as `send_sync` but gets intended
     /// to be used in async context.
-    pub async fn send_async<M>(&self, message: M) -> Result<(), Error>
+    pub async fn send_async<M>(&self, message: M) -> Result<(), Error<M>>
     where
         M: HandledBy<A> + 'a,
     {
         self.inner
             .send_async(InnerMessage::new(message, None))
             .await
-            .map_err(|_| Error::UnexpectedFailure)
+            .map_err(|SendError(im)| {
+                let p = (im.handle_message)(None);
+                let bm = unsafe { Box::from_raw(p as *mut M) };
+                Error::UnexpectedFailure(Some(*bm))
+            })
     }
 
     /// Sends a message to the current appliance and waits
@@ -336,24 +352,33 @@ impl<'a, A: ?Sized + 'a> Descriptor<'a, A> {
         &self,
         message: M,
         timeout: Option<Duration>,
-    ) -> Result<M::Result, Error>
+    ) -> Result<M::Result, Error<M>>
     where
         M: HandledBy<A> + 'a,
     {
         let (s, r) = bounded(1);
-        match self.inner.try_send(InnerMessage::new(message, Some(s))) {
-            Err(TrySendError::Full(_)) => return Err(Error::FullBuffer),
-            Err(TrySendError::Disconnected(_)) => return Err(Error::UnexpectedFailure),
+        let im = InnerMessage::new(message, Some(s));
+        match self.inner.try_send(im) {
+            Err(TrySendError::Full(im)) => {
+                let p = (im.handle_message)(None);
+                let bm = unsafe { Box::from_raw(p as *mut M) };
+                return Err(Error::FullBuffer(*bm));
+            }
+            Err(TrySendError::Disconnected(im)) => {
+                let p = (im.handle_message)(None);
+                let bm = unsafe { Box::from_raw(p as *mut M) };
+                return Err(Error::UnexpectedFailure(Some(*bm)));
+            }
             _ => {}
         }
         if let Some(timeout) = timeout {
             match r.recv_timeout(timeout) {
                 Ok(r) => Ok(r),
                 Err(RecvTimeoutError::Timeout) => Err(Error::Timeout),
-                Err(RecvTimeoutError::Disconnected) => Err(Error::UnexpectedFailure),
+                Err(RecvTimeoutError::Disconnected) => Err(Error::UnexpectedFailure(None)),
             }
         } else {
-            r.recv().map_err(|_| Error::UnexpectedFailure)
+            r.recv().map_err(|_| Error::UnexpectedFailure(None))
         }
     }
 
@@ -364,23 +389,22 @@ impl<'a, A: ?Sized + 'a> Descriptor<'a, A> {
         &self,
         message: M,
         timeout: Option<Duration>,
-    ) -> Result<M::Result, Error>
+    ) -> Result<M::Result, Error<M>>
     where
         M: HandledBy<A> + 'a,
     {
         let (send, recv) = bounded(1);
-        if let Err(_) = self
-            .inner
-            .send_async(InnerMessage::new(message, Some(send)))
-            .await
-        {
-            return Err(Error::UnexpectedFailure);
+        let im = InnerMessage::new(message, Some(send));
+        if let Err(SendError(im)) = self.inner.send_async(im).await {
+            let p = (im.handle_message)(None);
+            let bm = unsafe { Box::from_raw(p as *mut M) };
+            return Err(Error::UnexpectedFailure(Some(*bm)));
         }
         if let Some(timeout) = timeout {
             let f1 = async {
                 recv.recv_async()
                     .await
-                    .map_err(|_| Error::UnexpectedFailure)
+                    .map_err(|_| Error::UnexpectedFailure(None))
             };
             let f2 = async {
                 async_io::Timer::after(timeout).await;
@@ -390,7 +414,7 @@ impl<'a, A: ?Sized + 'a> Descriptor<'a, A> {
         } else {
             recv.recv_async()
                 .await
-                .map_err(|_| Error::UnexpectedFailure)
+                .map_err(|_| Error::UnexpectedFailure(None))
         }
     }
 }

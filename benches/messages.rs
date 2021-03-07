@@ -6,8 +6,8 @@ use appliance::{Appliance, Descriptor, Handler, DEFAULT_EXECUTOR};
 
 #[derive(Debug, Error)]
 pub enum Error {
-    #[error(transparent)]
-    ApplianceError(#[from] appliance::Error),
+    // #[error(transparent)]
+    // ApplianceError(#[from] appliance::Error),
     #[error(transparent)]
     IndexError(#[from] messages::InvalidIndex),
 }
@@ -56,13 +56,13 @@ impl Handler<messages::SetValue> for BenchAppliance {
 }
 
 impl Handler<messages::Validate> for BenchAppliance {
-    fn handle(&mut self, _m: messages::Validate) -> bool {
+    fn handle(&mut self, _: messages::Validate) -> bool {
         self.state().bit_lane.all()
     }
 }
 
 impl Handler<messages::Reset> for BenchAppliance {
-    fn handle(&mut self, _m: messages::Reset) {
+    fn handle(&mut self, _: messages::Reset) {
         self.state().bit_lane.clear();
     }
 }
@@ -86,11 +86,15 @@ pub fn set_bitvec(c: &mut Criterion) {
     let msg_count: usize = black_box(1_000_000);
     let benchmark = |descriptor: Descriptor<BenchAppliance>| {
         for i in 0..msg_count {
-            descriptor.send_sync(messages::SetValue(i))?;
+            descriptor
+                .send_sync(messages::SetValue(i))
+                .expect("failed to send message");
         }
-        let success = descriptor.send_and_wait_sync(messages::Validate, None)?;
+        let success = descriptor
+            .send_and_wait_sync(messages::Validate, None)
+            .expect("failed to send and wait message");
         if !success {
-            panic!("Validation has failed. Not all bits are set.")
+            panic!("validation has failed: not all bits are set")
         }
         Ok::<(), Error>(())
     };
